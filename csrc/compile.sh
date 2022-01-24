@@ -5,10 +5,10 @@ echo "Cleaning local files"
 make clean
 cd ..
 echo "Removing files from remote host"
-ssh students "rm -r ~/remote_compile/acc-mouse-control/"
+ssh students "rm -f -r ~/remote_compile/csrc/"
 echo "Copying files to remote host"
-scp -r acc-mouse-control/ students:~/remote_compile/
+scp -r csrc/ students:~/remote_compile/
 echo "Compiling on remote host"
-ssh students "cd ~/remote_compile/acc-mouse-control/ && make"
+ssh students "cd ~/remote_compile/csrc/ && make"
 echo "Copying compiled binary from host to local"
-scp students:~/remote_compile/acc-mouse-control/main.bin acc-mouse-control/
+scp students:~/remote_compile/csrc/main.bin csrc/
