@@ -69,10 +69,12 @@ void assert(int cond, char *fail_msg) {
 #define PCLK1_MHZ 16
 #define LIS35DE_ADDR 0x1c
 
+// TODO dostarczona jest przecież funkcja i2c_configure()
 void i2c_init() {
 	// Włącz taktowanie odpowiednich układów
 	RCC->AHB1ENR |= RCC_AHB1ENR_GPIOBEN;
 	RCC->APB1ENR |= RCC_APB1ENR_I2C1EN;
+	__NOP();
 
 	// Konfiguruj linię SCL na wyprowadzeniu PB8, a linię SDA – na
 	// wyprowadzeniu PB9, funkcja alternatywna
@@ -171,6 +173,115 @@ void acc_write(int reg_addr, char value) {
 	I2C1->CR1 |= I2C_CR1_STOP;
 }
 
+uint8_t acc_read_x() {
+	const int reg = 0x29;
+	const int timeout = 5000; // TODO ustawić jakoś rozsądnie
+
+	// Zainicjuj transmisję sygnału START
+	I2C1->CR1 |= I2C_CR1_START;
+
+	// I Czekaj na ustawienie bitu SB w rejestrze SR1, warunek
+	for (int i = 0; !(I2C1->SR1 & I2C_SR1_SB); i++) {
+		if (i >= timeout) {
+			// Po przekroczeniu czasu oczekiwania należy zwolnić szynę,
+			// wysyłając sygnał STOP
+			I2C1->CR1 |= I2C_CR1_STOP;
+			assert(0, "acc_read: Oczekiwanie na zakończenie transmisji START");
+			return;
+		}
+	}
+
+	// I Zainicjuj wysyłanie 7-bitowego adresu slave’a, tryb MT
+	I2C1->DR = LIS35DE_ADDR << 1;
+
+	// I Czekaj na zakończenie transmisji adresu, warunek
+	for (int i = 0; !(I2C1->SR1 & I2C_SR1_ADDR); i++) {
+		if (i >= timeout) {
+			// Po przekroczeniu czasu oczekiwania należy zwolnić szynę,
+			// wysyłając sygnał STOP
+			I2C1->CR1 |= I2C_CR1_STOP;
+			assert(0, "acc_read: Oczekiwanie na zakończenie transmisji adresu");
+			return;
+		}
+	}
+	
+	// I Skasuj bit ADDR
+	I2C1->SR2;
+	
+	// I Zainicjuj wysyłanie numeru rejestru slave’a
+	I2C1->DR = reg;
+	
+	// I Czekaj na zakończenie transmisji, czyli na ustawienie bitu BTF
+	// (ang. byte transfer finished) w rejestrze SR1, czyli na
+	//spełnienie warunku
+	for (int i = 0; !(I2C1->SR1 & I2C_SR1_BTF); i++) {
+		if (i >= timeout) {
+			// Po przekroczeniu czasu oczekiwania należy zwolnić szynę,
+			// wysyłając sygnał STOP
+			I2C1->CR1 |= I2C_CR1_STOP;
+			assert(0, "acc_read: Oczekiwanie na zakończenie transmisji numeru rejestru");
+			return;
+		}
+	}
+
+	// Zainicjuj transmisję sygnału REPEATED START
+	I2C1->CR1 |= I2C_CR1_START;
+
+	// I Czekaj na ustawienie bitu SB w rejestrze SR1, warunek
+	for (int i = 0; !(I2C1->SR1 & I2C_SR1_SB); i++) {
+		if (i >= timeout) {
+			// Po przekroczeniu czasu oczekiwania należy zwolnić szynę,
+			// wysyłając sygnał STOP
+			I2C1->CR1 |= I2C_CR1_STOP;
+			assert(0, "acc_read: Oczekiwanie na zakończenie transmisji REPEATED START");
+			return;
+		}
+	}
+
+	// I Zainicjuj wysyłanie 7-bitowego adresu slave’a, tryb MR
+	I2C1->DR = LIS35DE_ADDR << 1 | 1;
+
+	// I Ustaw, czy po odebraniu pierwszego bajtu ma być wysłany
+	// sygnał ACK czy NACK
+	// I Ponieważ ma być odebrany tylko jeden bajt, ustaw wysłanie
+	// sygnału NACK, zerując bit ACK
+	I2C1->CR1 &= ~I2C_CR1_ACK;
+
+	// I Czekaj na zakończenie transmisji adresu, warunek
+	for (int i = 0; !(I2C1->SR1 & I2C_SR1_ADDR); i++) {
+		if (i >= timeout) {
+			// Po przekroczeniu czasu oczekiwania należy zwolnić szynę,
+			// wysyłając sygnał STOP
+			I2C1->CR1 |= I2C_CR1_STOP;
+			assert(0, "acc_read: Oczekiwanie na zakończenie transmisji adresu (znowu)");
+			return;
+		}
+	}
+
+	// I Skasuj bit ADDR
+	I2C1->SR2;
+
+	// Zainicjuj transmisję sygnału STOP, aby został wysłany po
+	// odebraniu ostatniego (w tym przypadku jedynego) bajtu
+	I2C1->CR1 |= I2C_CR1_STOP;
+	
+	// I Czekaj na ustawienie bitu RXNE (ang. receiver data register
+	// not empty) w rejestrze SR1, warunek
+	for (int i = 0; !(I2C1->SR1 & I2C_SR1_RXNE); i++) {
+		if (i >= timeout) {
+			// Po przekroczeniu czasu oczekiwania należy zwolnić szynę,
+			// wysyłając sygnał STOP
+			I2C1->CR1 |= I2C_CR1_STOP;
+			assert(0, "acc_read: Oczekiwanie na RXNE");
+			return;
+		}
+	}
+	
+	// I Odczytaj odebraną 8-bitową wartość
+	char value = I2C1->DR;
+	return value;
+}
+
 // ######################################## MAIN ########################################
 
 int main() {
@@ -179,10 +290,9 @@ int main() {
 
     acc_write(0x20, 0b01000111); // set flags in ctrl1 register
 
-    // for (;;) {
-    // 	for (int i = 0; i < 4000000; i++) { __NOP(); }
-    // 	int value = acc_read();
-    // 	assert(value < 10, "value < 10");
-    // 	send_uint(value);
-    // }
+    for (;;) {
+    	for (int i = 0; i < 100000; i++) { __NOP(); }
+    	uint8_t value = acc_read_x();
+    	send_uint(value);
+    }
 }
