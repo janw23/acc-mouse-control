@@ -1,11 +1,6 @@
 #include <irq.h>
+#include <gpio.h>
 #include "dma_tx.h"
-
-int acc_read() {
-	static int test = 0;
-	test++;
-	return test - 1;
-}
 
 // ######################################## UTILS ########################################
 
@@ -68,17 +63,126 @@ void assert(int cond, char *fail_msg) {
 	}
 }
 
+// ######################################## ACC ########################################
+
+#define I2C_SPEED_HZ 100000
+#define PCLK1_MHZ 16
+#define LIS35DE_ADDR 0x1c
+
+void i2c_init() {
+	// Włącz taktowanie odpowiednich układów
+	RCC->AHB1ENR |= RCC_AHB1ENR_GPIOBEN;
+	RCC->APB1ENR |= RCC_APB1ENR_I2C1EN;
+
+	// Konfiguruj linię SCL na wyprowadzeniu PB8, a linię SDA – na
+	// wyprowadzeniu PB9, funkcja alternatywna
+	GPIOafConfigure(GPIOB, 8, GPIO_OType_OD,
+					GPIO_Low_Speed, GPIO_PuPd_NOPULL,
+					GPIO_AF_I2C1);
+	GPIOafConfigure(GPIOB, 9, GPIO_OType_OD,
+					GPIO_Low_Speed, GPIO_PuPd_NOPULL,
+					GPIO_AF_I2C1);
+
+	// Konfiguruj szynę w wersji podstawowej
+	I2C1->CR1 = 0;
+
+	// Konfiguruj częstotliwość taktowania szyny
+	I2C1->CCR = (PCLK1_MHZ * 1000000) /	(I2C_SPEED_HZ << 1);
+	I2C1->CR2 = PCLK1_MHZ;
+	I2C1->TRISE = PCLK1_MHZ + 1;
+	
+	// Włącz interfejs
+	I2C1->CR1 |= I2C_CR1_PE;
+
+	// Ważne info: Rejestry układu I2C1 są 16-bitowe
+}
+
+void acc_write(int reg_addr, char value) {
+	// Zainicjuj transmisję sygnału START
+	I2C1->CR1 |= I2C_CR1_START;
+
+	const int timeout = 5000; // TODO ustawić jakoś rozsądnie
+
+	// I Czekaj na zakończenie transmisji bitu START, co jest
+	// sygnalizowane ustawieniem bitu SB (ang. start bit) w rejestrze
+	// SR1, czyli czekaj na spełnienie warunku
+	for (int i = 0; !(I2C1->SR1 & I2C_SR1_SB); i++) {
+		if (i >= timeout) {
+			// Po przekroczeniu czasu oczekiwania należy zwolnić szynę,
+			// wysyłając sygnał STOP
+			I2C1->CR1 |= I2C_CR1_STOP;
+			assert(0, "Oczekiwanie na zakończenie transmisji START");
+			return;
+		}
+	}
+
+	// I Zainicjuj wysyłanie 7-bitowego adresu slave’a, tryb MT
+	I2C1->DR = LIS35DE_ADDR << 1;
+
+	// I Czekaj na zakończenie transmisji adresu, ustawienie bitu ADDR
+	// (ang. address sent) w rejestrze SR1, warunek
+	for (int i = 0; !(I2C1->SR1 & I2C_SR1_ADDR); i++) {
+		if (i >= timeout) {
+			// Po przekroczeniu czasu oczekiwania należy zwolnić szynę,
+			// wysyłając sygnał STOP
+			I2C1->CR1 |= I2C_CR1_STOP;
+			assert(0, "Oczekiwanie na zakończenie transmisji adresu");
+			return;
+		}
+	}
+
+	// I Skasuj bit ADDR przez odczytanie rejestru SR2 po odczytaniu
+	// rejestru SR1
+	I2C1->SR2;
+
+	 // Zainicjuj wysyłanie 8-bitowego numeru rejestru slave’a
+	I2C1->DR = reg_addr;
+
+	// I Czekaj na opróżnienie kolejki nadawczej, czyli na ustawienie
+	// bitu TXE (ang. transmitter data register empty ) w rejestrze
+	// SR1, warunek
+	for (int i = 0; !(I2C1->SR1 & I2C_SR1_TXE); i++) {
+		if (i >= timeout) {
+			// Po przekroczeniu czasu oczekiwania należy zwolnić szynę,
+			// wysyłając sygnał STOP
+			I2C1->CR1 |= I2C_CR1_STOP;
+			assert(0, "Oczekiwanie na opróżnienie kolejki nadawczej");
+			return;
+		}
+	}
+
+	// I Wstaw do kolejki nadawczej 8-bitową wartość zapisywaną do
+	// rejestru slave’a
+	I2C1->DR = value;
+
+	// I Czekaj na zakończenie transmisji, czyli na ustawienie bitu BTF
+	// (ang. byte transfer finished) w rejestrze SR1, warunek
+	for (int i = 0; !(I2C1->SR1 & I2C_SR1_BTF); i++) {
+		if (i >= timeout) {
+			// Po przekroczeniu czasu oczekiwania należy zwolnić szynę,
+			// wysyłając sygnał STOP
+			I2C1->CR1 |= I2C_CR1_STOP;
+			assert(0, "Oczekiwanie na zakończenie transmisji wartości rejestru");
+			return;
+		}
+	}
+
+	// I Zainicjuj transmisję sygnału STOP
+	I2C1->CR1 |= I2C_CR1_STOP;
+}
 
 // ######################################## MAIN ########################################
 
 int main() {
     dma_tx_init(MIDDLE_IRQ_PRIO);
+    i2c_init();
 
-    for (;;) {
-    	for (int i = 0; i < 4000000; i++) { __NOP(); }
+    acc_write(0x20, 0b01000111); // set flags in ctrl1 register
 
-    	int value = acc_read();
-    	assert(value < 10, "value < 10");
-    	send_uint(value);
-    }
+    // for (;;) {
+    // 	for (int i = 0; i < 4000000; i++) { __NOP(); }
+    // 	int value = acc_read();
+    // 	assert(value < 10, "value < 10");
+    // 	send_uint(value);
+    // }
 }
