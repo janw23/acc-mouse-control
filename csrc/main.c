@@ -41,7 +41,7 @@ void send_uint(int num) {
 	msg[length + 1] = '\r';
 	msg[length + 2] = '\0';
 
-	send(msg, length + 3);
+	send(msg, length + 2); // omitting null byte
 }
 
 int strlen(char *str) {
