@@ -10,7 +10,7 @@ CFLAGS = $(FLAGS) -Wall -g \
 LDFLAGS = $(FLAGS) -Wl,--gc-sections -nostartfiles \
 	-L/opt/arm/stm32/lds -Tstm32f411re.lds
 vpath %.c /opt/arm/stm32/src
-OBJECTS = main.o startup_stm32.o gpio.o queue.o dma_tx.o
+OBJECTS = main.o startup_stm32.o gpio.o queue.o dma_tx.o delay.o i2c_configure.o acc.o
 TARGET = main
 
 .SECONDARY: $(TARGET).elf $(OBJECTS)
