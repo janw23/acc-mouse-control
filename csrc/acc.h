@@ -1,6 +1,8 @@
 #ifndef _ACC_H
 #define _ACC_H
 
+#include <stm32.h>
+
 typedef struct {
 	uint8_t x;
 	uint8_t y;
