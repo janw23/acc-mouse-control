@@ -53,7 +53,7 @@ int main() {
     acc_write(0x20, 0b01000111); // set flags in ctrl1 register
     acc_read_xyz();
 
-    for (;;) {} // TODO remove
+    for (;;) {__NOP();} // TODO remove
 
     // for (;;) {
     // 	for (int i = 0; i < 100000; i++) { __NOP(); }

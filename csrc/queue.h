@@ -9,7 +9,7 @@ Istnieje tylko jedna, globalna kolejka.
 
 #include <stm32.h>
 
-#define QUEUE_CAPACITY 1024
+#define QUEUE_CAPACITY 2048
 
 // Typ definiujący element kolejki.
 typedef struct {
