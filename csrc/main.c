@@ -51,13 +51,10 @@ int main() {
     acc_init(LOW_IRQ_PRIO); // low prio only for debuggin purposes so that send() has priority
 
     acc_write(0x20, 0b01000111); // set flags in ctrl1 register
-    acc_read_xyz();
 
-    for (;;) {__NOP();} // TODO remove
-
-    // for (;;) {
-    // 	for (int i = 0; i < 100000; i++) { __NOP(); }
-    // 	uint8_t value = acc_read_x();
-    // 	send_uint(value);
-    // }
+    for (;;) {
+    	for (int i = 0; i < 100000; i++) { __NOP(); }
+    	uint8_t value = acc_read_xyz().x;
+    	send_uint(value);
+    }
 }
