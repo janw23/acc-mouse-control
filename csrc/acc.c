@@ -78,7 +78,6 @@ void i2c_send_addr(uint8_t addr, uint8_t master_mode) {
 }
 
 void i2c_send_data(uint8_t data, bool last_byte) {
-	I2C1->SR2; // clear the register by reading its value
 	I2C1->DR = data;
 
 	// If there is more data to send, enable buffer interrupts
@@ -104,11 +103,15 @@ void i2c_send_stop() {
 
 void i2c_await(uint16_t flag, uint16_t SR1) {
 	// TODO add timeout
-	if (SR1 & flag) i2c_next_stage();
+	if (!(SR1 & flag)) return;
+	
+	if (flag == FLAG_ADDR) {
+		I2C1->SR2; // clear addr bits
+	}
+	i2c_next_stage();
 }
 
 void i2c_prep_to_recv_byte() {
-	I2C1->SR2;
 	I2C1->CR2 |= I2C_CR2_ITBUFEN;
 	i2c_next_stage();
 }
@@ -172,7 +175,7 @@ void acc_write_mode_handler(uint16_t SR1) {
 		case  5: i2c_await(FLAG_ADDR, SR1); 			break;
 		case  6: i2c_send_data(acc_comm_state.reg, NOT_LAST_BYTE); 	
 														break;
-		case  7: i2c_await(FLAG_BTF, SR1); 				break;
+		case  7: i2c_await(FLAG_TXE, SR1); 				break;
 		case  8: i2c_send_data(acc_comm_state.val, LAST_BYTE); 
 														break;
 		case  9: i2c_await(FLAG_BTF, SR1); 				break;
@@ -232,6 +235,7 @@ void acc_init(uint32_t interrupt_prio) {
 
 void acc_write(uint8_t reg, uint8_t val) {
 	i2c_acquire(WRITE);
+	// These must be set after acquire().
 	acc_comm_state.reg = reg;
 	acc_comm_state.val = val;
 
