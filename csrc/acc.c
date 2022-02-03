@@ -13,17 +13,6 @@ typedef uint8_t bool
 #define LIS35DE_ADDR 0x1c  // i2c accelerometer address
 
 enum comm_mode {WRITE, READ};
-enum comm_stage {
-	IDLE,
-	START,
-	ADDR,
-	WRITE_TX_REG,
-	READ_TX_REG,
-	VAL,
-	REPEAT_START,
-	REPEAT_ADDR,
-	AWAIT_ACCVAL,
-};
 
 /*
 There is only one accelerometer device connected to the microcontroller
@@ -32,14 +21,13 @@ as a state machine and the following static global struct holds its state.
 */
 static struct {
 	enum comm_mode comm_mode;
-	enum comm_stage comm_stage;
+	uint8_t stage_number;
 	uint8_t reg;
 	uint8_t val;
-	int busy; // TODO this might be redundant, check for IDLE might suffice
+	bool busy;
 } acc_comm_state;
 
 void acc_init(uint32_t interrupt_prio) {
-	acc_comm_state.comm_stage = IDLE;
 	acc_comm_state.busy = 0;
 
 	i2c_configure(PCLK1_MHZ * 1e6); // multiplication converts MHZ to HZ
@@ -213,31 +201,36 @@ void on_await_accval_completed(uint16_t SR1) {
 	I2C1->CR2 &= ~(I2C_CR2_ITEVTEN | I2C_CR2_ITBUFEN);
 }
 
-// WRITE
-// send start
-// send slave addres, MT mode
-// send register addres
-// send register value
-// send stop
-
-// READ
-// send start
-// while there are registers to read:
-	// send slave address, MT mode
-	// send register address
-	// send start
-	// send slave address, MR mode
-	// (send stop and NACK before receiving last byte)
-	// receive byte
-
 // ################################################################
+
+#define LAST_BYTE true
+#define NOT_LAST_BYTE false
+
+#define MASTER_RX 0
+#define MASTER_TX 1
+
+#define FLAG_START I2C_SR1_SB
+#define FLAG_ADDR  I2C_SR1_ADDR
+#define FLAG_TXE   I2C_SR1_TXE
+#define FLAG_RXNE  I2C_SR1_RXNE
+#define FLAG_BTF   I2C_SR1_BTF
+
+void i2c_next_stage() {
+	acc_comm_state.stage_number++;
+}
+
+void i2c_goto_stage(uint8_t num) {
+	acc_comm_state.stage_number = num;
+}
 
 void i2c_send_start() {
 	I2C1->CR1 |= I2C_CR1_START;
+	i2c_next_stage();
 }
 
 void i2c_send_addr(uint8_t addr) {
 	I2C1->DR = data;
+	i2c_next_stage();
 }
 
 void i2c_send_data(uint8_t data, bool last_byte) {
@@ -251,39 +244,90 @@ void i2c_send_data(uint8_t data, bool last_byte) {
 	} else {
 		I2C1->CR2 |= I2C_CR2_ITBUFEN;
 	}
+
+	i2c_next_stage();
+}
+
+void i2c_send_nack() {
+	I2C1->CR1 &= ~I2C_CR1_ACK;
+	i2c_next_stage();
 }
 
 void i2c_send_stop() {
 	I2C1->CR1 |= I2C_CR1_STOP;
+	i2c_next_stage();
 }
 
+void i2c_await(uint16_t flag, uint16_t SR1) {
+	// TODO add timeout
+	if (SR1 & flag) i2c_next_stage();
+}
+
+void i2c_prep_to_recv_byte() {
+	I2C1->SR2;
+	I2C1->CR2 |= I2C_CR2_ITBUFEN;
+	i2c_next_stage();
+}
+
+bool i2c_is_reading_last_axis() {
+	// TODO implement
+	return true;
+}
+
+void i2c_recv_one_byte(uint8_t *dst) {
+	acc_comm_state.val = I2C1->DR;
+	I2C1->CR2 &= ~I2C_CR2_ITBUFEN;
+	i2c_next_stage();
+}
+
+void i2c_acquire(enum comm_mode mode) {
+	assert(!acc_comm_state.busy, "i2c_acquire called while i2c busy");
+	acc_comm_state.comm_mode = mode;
+	acc_comm_state.stage_number = 0;
+	acc_comm_state.busy = true;
+
+	// Clear i2c interrupts;
+	I2C1->SR1;
+	I2C1->SR2;
+	// Enable event interrupts.
+	I2C1->CR2 |= I2C_CR2_ITEVTEN;
+}
+
+void i2c_release() {
+	// Disable i2c interrupts.
+	I2C1->CR2 &= ~(I2C_CR2_ITEVTEN | I2C_CR2_ITBUFEN);
+	acc_comm_state.busy = false;
+}
+
+// TODO remove, just draft
 void acc_write(uint8_t reg, uint8_t val) {
 	i2c_acquire();
 	i2c_send_start();
 	// await start
 	i2c_send_addr(SLAVE_ADDR | MT);
 	// await addr
-	i2c_send_data(reg, false);
+	i2c_send_data(reg, NOT_LAST_BYTE);
 	// await TXE
-	i2c_send_data(val, true);
+	i2c_send_data(val, LAST_BYTE);
 	// await BTF
 	i2c_send_stop();
 	i2c_release();
 }
 
+// TODO remove, just draft
 void acc_read_xyz() {
 	i2c_acquire();
 	i2c_send_start();
 
 	// while:
 	// await start
-	i2c_send_addr(SLAVE_ADDR | MT);
+	i2c_send_addr(SLAVE_ADDR, MASTER_TX);
 	// await addr
-	i2c_send_data(REG_ADDR, true);
+	i2c_send_data(REG_ADDR, LAST_BYTE);
 	// await BTF
 	i2c_send_start();
 	// await start
-	i2c_send_addr(SLAVE_ADDR | MR);
+	i2c_send_addr(SLAVE_ADDR, MASTER_RX);
 	i2c_send_nack();
 	// await addr
 	i2c_prep_to_recv_byte();
@@ -299,15 +343,15 @@ void acc_read_xyz() {
 void acc_write_mode_handler(uint16_t SR1) {
 	switch (acc_comm_state.stage_number) {
 		// Stage 0 is performed in acc_write().
-		case  1: i2c_await_start(SR1); break;
+		case  1: i2c_await(FLAG_START, SR1); break;
 		case  2: i2c_send_start(); break;
-		case  3: i2c_await_start(SR1); break;
-		case  4: i2c_send_addr(SLAVE_ADDR | MT); break
-		case  5: i2c_await_addr(SR1);
-		case  6: i2c_send_data(reg, false); break
-		case  7: i2c_await_txe(SR1); break
-		case  8: i2c_send_data(val, true); break;
-		case  9: i2c_await_btf(SR1); break;
+		case  3: i2c_await(FLAG_START, SR1); break;
+		case  4: i2c_send_addr(SLAVE_ADDR, MASTER_TX); break
+		case  5: i2c_await(FLAG_ADDR, SR1); break;
+		case  6: i2c_send_data(reg, NOT_LAST_BYTE); break
+		case  7: i2c_await(FLAG_BTF, SR1) break
+		case  8: i2c_send_data(val, LAST_BYTE); break;
+		case  9: i2c_await(FLAG_BTF, SR1); break;
 		case 10: i2c_send_stop();
 				 i2c_release();
 				 break;
@@ -318,26 +362,26 @@ void acc_write_mode_handler(uint16_t SR1) {
 void acc_read_mode_handler(uint16_t SR1) {
 	switch (acc_comm_state.stage_number) {
 		// Stage 0 is performed in acc_read_xyz().
-		case  1: i2c_await_start(SR1); 				break;
-		case  2: i2c_send_addr(SLAVE_ADDR | MT); 	break;
-		case  3: i2c_await_addr(SR1); 				break;
-		case  4: i2c_send_data(REG_ADDR, true); 	break;
-		case  5: i2c_await_btf(SR1); 				break;
+		case  1: i2c_await(FLAG_START, SR1);				break;
+		case  2: i2c_send_addr(SLAVE_ADDR, MASTER_TX); 	break;
+		case  3: i2c_await(FLAG_ADDR, SR1);				break;
+		case  4: i2c_send_data(REG_ADDR, LAST_BYTE); 	break;
+		case  5: i2c_await(FLAG_BTF, SR1);				break;
 		case  6: i2c_send_start(); 					break;
-		case  7: i2c_await_start(SR1); 				break;
-		case  8: i2c_send_addr(SLAVE_ADDR | MR);
+		case  7: i2c_await(FLAG_START, SR1); 				break;
+		case  8: i2c_send_addr(SLAVE_ADDR, MASTER_RX);
 		         i2c_send_nack();
-		         i2c_set_stage(9);					break;
-		case  9: i2c_await_addr(SR1); 				break;
+		         i2c_goto_stage(9);					break;
+		case  9: i2c_await(FLAG_ADDR, SR1);				break;
 		case 10: i2c_prep_to_recv_byte();
-				 if (i2c_reading_last_axis())
+				 if (i2c_is_reading_last_axis())
 				 	 i2c_send_stop();
-				 i2c_set_stage(11);			 		break;
-		case 11: i2c_await_rxne(SR1); 				break;
+				 i2c_goto_stage(11);			 		break;
+		case 11: i2c_await(FLAG_RXNE, SR1);				break;
 		case 12: i2c_recv_one_byte();
-				 if (!i2c_reading_last_axis()) {
+				 if (!i2c_is_reading_last_axis()) {
 				 	 i2c_send_start();
-				 	 i2c_set_stage(1); // begin the next loop
+				 	 i2c_goto_stage(1); // begin the next loop
 				 } else i2c_release();				break;
 		default: assert(false, "acc_read_mode_handler"); break;
 	}
