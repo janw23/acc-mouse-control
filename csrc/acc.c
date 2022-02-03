@@ -4,6 +4,10 @@
 #include <i2c_configure.h>
 #include <irq.h>
 
+typedef uint8_t bool
+#define true 1
+#define false 0
+
 #define I2C_SPEED_HZ 100000
 #define PCLK1_MHZ 16
 #define LIS35DE_ADDR 0x1c  // i2c accelerometer address
@@ -172,12 +176,12 @@ void on_read_tx_reg_completed(uint16_t SR1) {
 
 void on_repeat_start_completed(uint16_t SR1) {
 	// send("on_repeat_start_completed\n\r", 27);
-	// START flag is preceded by BTF interrupt, so we wait
+	// START flag is preceded by BTF interrupt, so we wait TODO?
 	if(!check_flag(SR1, I2C_SR1_SB)) return;
 	// Init 7-bit slave address transimssion in MR mode.
 	I2C1->DR = LIS35DE_ADDR << 1 | 1;
-	// Set NACK transmission because only 1 byte is going to be received. TODO this will change
-	I2C1->CR1 &= ~I2C_CR1_ACK;
+	// Set ACK transmission because we want to receive more than one byte.
+	I2C1->CR1 |= I2C_CR1_ACK;
 
 	acc_comm_state.comm_stage = REPEAT_ADDR;
 }
@@ -209,8 +213,145 @@ void on_await_accval_completed(uint16_t SR1) {
 	I2C1->CR2 &= ~(I2C_CR2_ITEVTEN | I2C_CR2_ITBUFEN);
 }
 
+// WRITE
+// send start
+// send slave addres, MT mode
+// send register addres
+// send register value
+// send stop
+
+// READ
+// send start
+// while there are registers to read:
+	// send slave address, MT mode
+	// send register address
+	// send start
+	// send slave address, MR mode
+	// (send stop and NACK before receiving last byte)
+	// receive byte
+
+// ################################################################
+
+void i2c_send_start() {
+	I2C1->CR1 |= I2C_CR1_START;
+}
+
+void i2c_send_addr(uint8_t addr) {
+	I2C1->DR = data;
+}
+
+void i2c_send_data(uint8_t data, bool last_byte) {
+	I2C1->SR2; // clear the register by reading its value
+	I2C1->DR = data;
+
+	// If there is more data to send, enable buffer interrupts
+	// to detect when TX queue is empty and can take more data.
+	if (last_byte) {
+		I2C1->CR2 &= ~I2C_CR2_ITBUFEN;
+	} else {
+		I2C1->CR2 |= I2C_CR2_ITBUFEN;
+	}
+}
+
+void i2c_send_stop() {
+	I2C1->CR1 |= I2C_CR1_STOP;
+}
+
+void acc_write(uint8_t reg, uint8_t val) {
+	i2c_acquire();
+	i2c_send_start();
+	// await start
+	i2c_send_addr(SLAVE_ADDR | MT);
+	// await addr
+	i2c_send_data(reg, false);
+	// await TXE
+	i2c_send_data(val, true);
+	// await BTF
+	i2c_send_stop();
+	i2c_release();
+}
+
+void acc_read_xyz() {
+	i2c_acquire();
+	i2c_send_start();
+
+	// while:
+	// await start
+	i2c_send_addr(SLAVE_ADDR | MT);
+	// await addr
+	i2c_send_data(REG_ADDR, true);
+	// await BTF
+	i2c_send_start();
+	// await start
+	i2c_send_addr(SLAVE_ADDR | MR);
+	i2c_send_nack();
+	// await addr
+	i2c_prep_to_recv_byte();
+	if (/* recving last byte */) send_stop();
+	// await RXNE
+	i2c_recv_one_byte();
+	if (/* there's more to recv */) i2c_send_start();
+	// end while
+
+	i2c_release();
+}
+
+void acc_write_mode_handler(uint16_t SR1) {
+	switch (acc_comm_state.stage_number) {
+		// Stage 0 is performed in acc_write().
+		case  1: i2c_await_start(SR1); break;
+		case  2: i2c_send_start(); break;
+		case  3: i2c_await_start(SR1); break;
+		case  4: i2c_send_addr(SLAVE_ADDR | MT); break
+		case  5: i2c_await_addr(SR1);
+		case  6: i2c_send_data(reg, false); break
+		case  7: i2c_await_txe(SR1); break
+		case  8: i2c_send_data(val, true); break;
+		case  9: i2c_await_btf(SR1); break;
+		case 10: i2c_send_stop();
+				 i2c_release();
+				 break;
+		default: assert(false, "acc_write_mode_handler"); break;
+	}
+}
+
+void acc_read_mode_handler(uint16_t SR1) {
+	switch (acc_comm_state.stage_number) {
+		// Stage 0 is performed in acc_read_xyz().
+		case  1: i2c_await_start(SR1); 				break;
+		case  2: i2c_send_addr(SLAVE_ADDR | MT); 	break;
+		case  3: i2c_await_addr(SR1); 				break;
+		case  4: i2c_send_data(REG_ADDR, true); 	break;
+		case  5: i2c_await_btf(SR1); 				break;
+		case  6: i2c_send_start(); 					break;
+		case  7: i2c_await_start(SR1); 				break;
+		case  8: i2c_send_addr(SLAVE_ADDR | MR);
+		         i2c_send_nack();
+		         i2c_set_stage(9);					break;
+		case  9: i2c_await_addr(SR1); 				break;
+		case 10: i2c_prep_to_recv_byte();
+				 if (i2c_reading_last_axis())
+				 	 i2c_send_stop();
+				 i2c_set_stage(11);			 		break;
+		case 11: i2c_await_rxne(SR1); 				break;
+		case 12: i2c_recv_one_byte();
+				 if (!i2c_reading_last_axis()) {
+				 	 i2c_send_start();
+				 	 i2c_set_stage(1); // begin the next loop
+				 } else i2c_release();				break;
+		default: assert(false, "acc_read_mode_handler"); break;
+	}
+}
+
+// ################################################################
+
 void I2C1_EV_IRQHandler() {
 	uint16_t SR1 = I2C1->SR1;
+
+	switch (acc_comm_state.comm_mode) {
+		case WRITE: acc_write_mode_handler(SR1); break;
+		case  READ: acc_read_mode_handler(SR1);  break;
+	}
 
 	switch (acc_comm_state.comm_stage) {
 		case START: on_start_completed(SR1); break;
