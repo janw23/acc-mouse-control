@@ -29,19 +29,15 @@ int uint_to_string(int num, char *buf) {
 }
 
 void send_uint(int num) {
-	static char buf[512];
+	static char buf[2048];
 	static int buf_index = 0;
 
 	char *msg = buf + buf_index;
 	buf_index += 32;
-	if (buf_index == 512) buf_index = 0;
+	if (buf_index == 2048) buf_index = 0;
 
 	int length = uint_to_string(num, msg); // length is at most 10
-	msg[length] = '\n';
-	msg[length + 1] = '\r';
-	msg[length + 2] = '\0';
-
-	send(msg, length + 2); // omitting null byte
+	send(msg, length); // omitting null byte
 }
 
 // ######################################## MAIN ########################################
@@ -54,7 +50,17 @@ int main() {
 
     for (;;) {
     	for (int i = 0; i < 100000; i++) { __NOP(); }
-    	uint8_t value = acc_read_xyz().x;
-    	send_uint(value);
+
+    	acc_reading_t reading = acc_read_xyz();
+    	send_uint(reading.x);
+    	send(" ", 1);
+
+    	send_uint(reading.y);
+    	send(" ", 1);
+
+    	send_uint(reading.z);
+    	send(" ", 1);
+
+    	send("\n\r", 2);
     }
 }

@@ -55,6 +55,17 @@ void send_binary(uint16_t val) {
 	send("\n\r", 2);
 }
 
+void send_byte(uint8_t val) {
+	static char buf[1024];
+	static int buf_index = 0;
+
+	for (uint8_t i = 100; i > 0; i /= 10) {
+		buf[buf_index] = 48 + (val / i) % 10;
+		send(&buf[buf_index], 1);
+		buf_index = (buf_index + 1) % 1024;
+	}
+}
+
 // ################################################################
 
 
@@ -101,14 +112,15 @@ void i2c_send_stop() {
 	i2c_next_stage();
 }
 
-void i2c_await(uint16_t flag, uint16_t SR1) {
+bool i2c_await(uint16_t flag, uint16_t SR1) {
 	// TODO add timeout
-	if (!(SR1 & flag)) return;
-	
+	if (!(SR1 & flag)) return false;
+
 	if (flag == FLAG_ADDR) {
 		I2C1->SR2; // clear addr bits
 	}
-	i2c_next_stage();
+
+	return true;
 }
 
 void i2c_prep_to_recv_byte() {
@@ -168,50 +180,74 @@ void i2c_release() {
 void acc_write_mode_handler(uint16_t SR1) {
 	switch (acc_comm_state.stage_number) {
 		// Stage 0 is performed in acc_write().
-		case  1: i2c_await(FLAG_START, SR1); 			break;
-		case  2: i2c_send_start(); 						break;
-		case  3: i2c_await(FLAG_START, SR1); 			break;
-		case  4: i2c_send_addr(SLAVE_ADDR, MASTER_TX); 	break;
-		case  5: i2c_await(FLAG_ADDR, SR1); 			break;
-		case  6: i2c_send_data(acc_comm_state.reg, NOT_LAST_BYTE); 	
-														break;
-		case  7: i2c_await(FLAG_TXE, SR1); 				break;
-		case  8: i2c_send_data(acc_comm_state.val, LAST_BYTE); 
-														break;
-		case  9: i2c_await(FLAG_BTF, SR1); 				break;
-		case 10: i2c_send_stop();
-				 i2c_release();				 			break;
-		default: assert(0, "acc_write_mode_handler"); 	break;
+		case 1: 
+			if (i2c_await(FLAG_START, SR1))
+				i2c_send_addr(SLAVE_ADDR, MASTER_TX);
+		 	break;
+		case 2: 
+			if (i2c_await(FLAG_ADDR, SR1))
+				i2c_send_data(acc_comm_state.reg, NOT_LAST_BYTE); 	
+			break;
+		case 3:
+			if (i2c_await(FLAG_TXE, SR1))	
+				i2c_send_data(acc_comm_state.val, LAST_BYTE); 
+			break;
+		case 4: 
+			if (i2c_await(FLAG_BTF, SR1)) {		
+				i2c_send_stop();
+				i2c_release();				
+			}
+			break;
+		default: 
+			send("entering deafult branch\n\r", 25);
+			send("stage_number: ", 14);
+			send_byte(acc_comm_state.stage_number);
+			send("\n\r", 2);
+			assert(0, "acc_write_mode_handler");
+			break;
 	}
 }
 
 void acc_read_mode_handler(uint16_t SR1) {
 	switch (acc_comm_state.stage_number) {
 		// Stage 0 is performed in acc_read_xyz().
-		case  1: i2c_await(FLAG_START, SR1);			break;
-		case  2: i2c_send_addr(SLAVE_ADDR, MASTER_TX); 	break;
-		case  3: i2c_await(FLAG_ADDR, SR1);				break;
-		case  4: i2c_send_data(acc_comm_state.reg, LAST_BYTE);
-		 												break;
-		case  5: i2c_await(FLAG_BTF, SR1);				break;
-		case  6: i2c_send_start(); 						break;
-		case  7: i2c_await(FLAG_START, SR1); 			break;
-		case  8: i2c_send_addr(SLAVE_ADDR, MASTER_RX);
-		         i2c_send_nack();
-		         i2c_goto_stage(9);						break;
-		case  9: i2c_await(FLAG_ADDR, SR1);				break;
-		case 10: i2c_prep_to_recv_byte();
-				 if (i2c_is_reading_last_axis())
-				 	 i2c_send_stop();
-				 i2c_goto_stage(11);			 		break;
-		case 11: i2c_await(FLAG_RXNE, SR1);				break;
-		case 12: i2c_recv_axis_value();
+		case 1: 
+			if (i2c_await(FLAG_START, SR1))
+				i2c_send_addr(SLAVE_ADDR, MASTER_TX); 	
+			break;
+		case 2:
+			if (i2c_await(FLAG_ADDR, SR1))
+				i2c_send_data(acc_comm_state.reg, LAST_BYTE);
+			break;
+		case 3:
+			if (i2c_await(FLAG_BTF, SR1))
+				i2c_send_start();
+			break;
+		case 4:
+			if (i2c_await(FLAG_START, SR1)) {
+				i2c_send_addr(SLAVE_ADDR, MASTER_RX);
+				i2c_send_nack();
+		        i2c_goto_stage(5);	
+			}
+			break;
+		case 5:
+			if (i2c_await(FLAG_ADDR, SR1)) {
+				i2c_prep_to_recv_byte();
+				if (i2c_is_reading_last_axis())
+					i2c_send_stop();
+				i2c_goto_stage(6);
+			}
+		case 6:
+			if (i2c_await(FLAG_RXNE, SR1)) {
+				i2c_recv_axis_value();
 				 if (!i2c_is_reading_last_axis()) {
 				 	 i2c_send_start();
 				 	 i2c_next_axis();
 				 	 i2c_goto_stage(1); // begin the next loop
-				 } else i2c_release();					break;
-		default: assert(0, "acc_read_mode_handler"); 	break;
+				 } else i2c_release();
+			}
+			break;
+		default: assert(0, "acc_read_mode_handler"); 
 	}
 }
 
@@ -241,6 +277,8 @@ void acc_write(uint8_t reg, uint8_t val) {
 
 	i2c_send_start();
 	// TODO invoke some interrupt on finish?
+
+	while (acc_comm_state.busy) { __NOP(); } // TODO should not wait actively
 }
 
 acc_reading_t acc_read_xyz() {
