@@ -38,7 +38,7 @@ static struct {
 	enum axis current_axis;
 	uint8_t reg;
 	uint8_t val;
-	uint8_t axes[3]; // (x, y, z) acc values
+	acc_reading_t acc_readings; // acc values for each axis
 	bool busy;
 } acc_comm_state;
 
@@ -152,7 +152,12 @@ bool i2c_is_reading_last_axis() {
 }
 
 void i2c_recv_axis_value() {
-	acc_comm_state.axes[acc_comm_state.current_axis] = I2C1->DR;
+	switch (acc_comm_state.current_axis) {
+		case X_AXIS: acc_comm_state.acc_readings.x = I2C1->DR; break;
+		case Y_AXIS: acc_comm_state.acc_readings.y = I2C1->DR; break;
+		case Z_AXIS: acc_comm_state.acc_readings.z = I2C1->DR; break;
+	}
+
 	I2C1->CR2 &= ~I2C_CR2_ITBUFEN;
 	i2c_next_stage();
 }
@@ -195,7 +200,8 @@ void acc_write_mode_handler(uint16_t SR1) {
 		case 4: 
 			if (i2c_await(FLAG_BTF, SR1)) {		
 				i2c_send_stop();
-				i2c_release();				
+				i2c_release();
+				on_acc_write_complete(); // TODO make sure this is fine
 			}
 			break;
 		default: 
@@ -244,7 +250,10 @@ void acc_read_mode_handler(uint16_t SR1) {
 				 	 i2c_send_start();
 				 	 i2c_next_axis();
 				 	 i2c_goto_stage(1); // begin the next loop
-				 } else i2c_release();
+				 } else {
+				 	i2c_release();
+				 	on_acc_read_complete(acc_comm_state.acc_readings); // TODO make sure this is fine
+				 }
 			}
 			break;
 		default: assert(0, "acc_read_mode_handler"); 
@@ -276,21 +285,9 @@ void acc_write(uint8_t reg, uint8_t val) {
 	acc_comm_state.val = val;
 
 	i2c_send_start();
-	// TODO invoke some interrupt on finish?
-
-	while (acc_comm_state.busy) { __NOP(); } // TODO should not wait actively
 }
 
-acc_reading_t acc_read_xyz() {
+void acc_read_xyz() {
 	i2c_acquire(READ);
 	i2c_send_start();
-
-	while (acc_comm_state.busy) { __NOP(); } // TODO should not wait actively
-
-	// TODO instead of returning invoke some interrupt?
-	return (acc_reading_t) {
-		acc_comm_state.axes[X_AXIS],
-		acc_comm_state.axes[Y_AXIS],
-		acc_comm_state.axes[Z_AXIS],
-	};
 }

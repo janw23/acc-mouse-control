@@ -15,6 +15,15 @@ void acc_init();
 void acc_write(uint8_t reg, uint8_t val);
 
 // Odczytuje wartości przyspieszenia w każdej osi zmierzone przez akcelerometr.
-acc_reading_t acc_read_xyz();
+void acc_read_xyz();
+
+// Called when acc_write() completes.
+// To be implemented by the user.
+void on_acc_write_complete();
+
+// Called when acc_read_xyz() completes.
+// Argument is acc value read from acelerometer.
+// To be implemeted by the user.
+void on_acc_read_complete(acc_reading_t);
 
 #endif // _ACC_H

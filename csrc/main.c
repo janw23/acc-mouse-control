@@ -42,25 +42,25 @@ void send_uint(int num) {
 
 // ######################################## MAIN ########################################
 
+void on_acc_write_complete() {
+	acc_read_xyz();
+}
+
+void on_acc_read_complete(acc_reading_t reading) {
+	send_uint(reading.x);
+	send(" ", 1);
+	send_uint(reading.y);
+	send(" ", 1);
+	send_uint(reading.z);
+	send(" ", 1);
+	send("\n\r", 2);
+
+	acc_read_xyz();
+}
+
 int main() {
     dma_tx_init(MIDDLE_IRQ_PRIO);
     acc_init(LOW_IRQ_PRIO); // low prio only for debuggin purposes so that send() has priority
 
     acc_write(0x20, 0b01000111); // set flags in ctrl1 register
-
-    for (;;) {
-    	for (int i = 0; i < 100000; i++) { __NOP(); }
-
-    	acc_reading_t reading = acc_read_xyz();
-    	send_uint(reading.x);
-    	send(" ", 1);
-
-    	send_uint(reading.y);
-    	send(" ", 1);
-
-    	send_uint(reading.z);
-    	send(" ", 1);
-
-    	send("\n\r", 2);
-    }
 }
