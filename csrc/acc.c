@@ -1,6 +1,5 @@
 #include "acc.h"
 #include "assert.h"
-#include "dma_tx.h" // TODO RT
 #include <i2c_configure.h>
 #include <irq.h>
 
@@ -11,6 +10,10 @@ typedef uint8_t bool;
 #define I2C_SPEED_HZ 100000
 #define PCLK1_MHZ 16
 #define SLAVE_ADDR 0x1c  // i2c accelerometer address
+
+#define X_REG_ADDR 0x29
+#define Y_REG_ADDR 0x2B
+#define Z_REG_ADDR 0x2D
 
 #define LAST_BYTE true
 #define NOT_LAST_BYTE false
@@ -38,57 +41,29 @@ static struct {
 	enum axis current_axis;
 	uint8_t reg;
 	uint8_t val;
-	acc_reading_t acc_readings; // acc values for each axis
+	acc_reading_t acc_readings;
 	bool busy;
 } acc_comm_state;
 
-// TODO remove this utility function
-void send_binary(uint16_t val) {
-	static char buf[1024];
-	static int buf_index = 0;
-
-	for (uint16_t i = 0; i < 16; i++) {
-		buf[buf_index] = 48 + (val >> (15 - i)) % 2;
-		send(&buf[buf_index], 1);
-		buf_index = (buf_index + 1) % 1024;
-	}
-	send("\n\r", 2);
-}
-
-void send_byte(uint8_t val) {
-	static char buf[1024];
-	static int buf_index = 0;
-
-	for (uint8_t i = 100; i > 0; i /= 10) {
-		buf[buf_index] = 48 + (val / i) % 10;
-		send(&buf[buf_index], 1);
-		buf_index = (buf_index + 1) % 1024;
-	}
-}
-
-// ################################################################
-
-
-
-void i2c_next_stage() {
+static void i2c_next_stage() {
 	acc_comm_state.stage_number++;
 }
 
-void i2c_goto_stage(uint8_t num) {
+static void i2c_goto_stage(uint8_t num) {
 	acc_comm_state.stage_number = num;
 }
 
-void i2c_send_start() {
+static void i2c_send_start() {
 	I2C1->CR1 |= I2C_CR1_START;
 	i2c_next_stage();
 }
 
-void i2c_send_addr(uint8_t addr, uint8_t master_mode) {
+static void i2c_send_addr(uint8_t addr, uint8_t master_mode) {
 	I2C1->DR = (addr << 1) | (master_mode == MASTER_TX ? 0 : 1);
 	i2c_next_stage();
 }
 
-void i2c_send_data(uint8_t data, bool last_byte) {
+static void i2c_send_data(uint8_t data, bool last_byte) {
 	I2C1->DR = data;
 
 	// If there is more data to send, enable buffer interrupts
@@ -102,18 +77,18 @@ void i2c_send_data(uint8_t data, bool last_byte) {
 	i2c_next_stage();
 }
 
-void i2c_send_nack() {
+static void i2c_send_nack() {
 	I2C1->CR1 &= ~I2C_CR1_ACK;
 	i2c_next_stage();
 }
 
-void i2c_send_stop() {
+static void i2c_send_stop() {
 	I2C1->CR1 |= I2C_CR1_STOP;
 	i2c_next_stage();
 }
 
-bool i2c_await(uint16_t flag, uint16_t SR1) {
-	// TODO add timeout
+static bool i2c_await(uint16_t flag, uint16_t SR1) {
+	// No timeout used because this would mean failed acc read anyway.
 	if (!(SR1 & flag)) return false;
 
 	if (flag == FLAG_ADDR) {
@@ -123,23 +98,22 @@ bool i2c_await(uint16_t flag, uint16_t SR1) {
 	return true;
 }
 
-void i2c_prep_to_recv_byte() {
+static void i2c_prep_to_recv_byte() {
 	I2C1->CR2 |= I2C_CR2_ITBUFEN;
 	i2c_next_stage();
 }
 
-void i2c_set_current_axis(enum axis axis) {
+static void i2c_set_current_axis(enum axis axis) {
 	switch (axis) {
-		// TODO magic contants
-		case X_AXIS: acc_comm_state.reg = 0x29; break;
-		case Y_AXIS: acc_comm_state.reg = 0x2B; break;
-		case Z_AXIS: acc_comm_state.reg = 0x2D; break;
+		case X_AXIS: acc_comm_state.reg = X_REG_ADDR; break;
+		case Y_AXIS: acc_comm_state.reg = Y_REG_ADDR; break;
+		case Z_AXIS: acc_comm_state.reg = Z_REG_ADDR; break;
 		default: assert(false, "Reached default branch in i2c_set_current_axis");
 	}
 	acc_comm_state.current_axis = axis;
 }
 
-void i2c_next_axis() {
+static void i2c_next_axis() {
 	switch (acc_comm_state.current_axis) {
 		case X_AXIS: i2c_set_current_axis(Y_AXIS); break;
 		case Y_AXIS: i2c_set_current_axis(Z_AXIS); break;
@@ -147,11 +121,11 @@ void i2c_next_axis() {
 	}
 }
 
-bool i2c_is_reading_last_axis() {
+static bool i2c_is_reading_last_axis() {
 	return acc_comm_state.current_axis == Z_AXIS;
 }
 
-void i2c_recv_axis_value() {
+static void i2c_recv_axis_value() {
 	switch (acc_comm_state.current_axis) {
 		case X_AXIS: acc_comm_state.acc_readings.x = I2C1->DR; break;
 		case Y_AXIS: acc_comm_state.acc_readings.y = I2C1->DR; break;
@@ -162,27 +136,30 @@ void i2c_recv_axis_value() {
 	i2c_next_stage();
 }
 
-void i2c_acquire(enum comm_mode mode) {
-	assert(!acc_comm_state.busy, "i2c_acquire called while i2c busy");
+// Sets correct state to start communication over i2c and marks it as busy.
+static void i2c_acquire(enum comm_mode mode) {
+	assert(!acc_comm_state.busy, "i2c_acquire called while i2c was busy");
+
 	acc_comm_state.comm_mode = mode;
 	i2c_goto_stage(0);
 	i2c_set_current_axis(X_AXIS);
 	acc_comm_state.busy = true;
 
-	// Clear i2c interrupts;
+	// Clear interrupts;
 	I2C1->SR1;
 	I2C1->SR2;
 	// Enable event interrupts.
 	I2C1->CR2 |= I2C_CR2_ITEVTEN;
 }
 
-void i2c_release() {
+static void i2c_release() {
 	// Disable i2c interrupts.
 	I2C1->CR2 &= ~(I2C_CR2_ITEVTEN | I2C_CR2_ITBUFEN);
 	acc_comm_state.busy = false;
 }
 
-void acc_write_mode_handler(uint16_t SR1) {
+// Handles i2c interrupts in WRITE mode.
+static void acc_write_mode_handler(uint16_t SR1) {
 	switch (acc_comm_state.stage_number) {
 		// Stage 0 is performed in acc_write().
 		case 1: 
@@ -201,20 +178,15 @@ void acc_write_mode_handler(uint16_t SR1) {
 			if (i2c_await(FLAG_BTF, SR1)) {		
 				i2c_send_stop();
 				i2c_release();
-				on_acc_write_complete(); // TODO make sure this is fine
+				on_acc_write_complete();
 			}
 			break;
-		default: 
-			send("entering deafult branch\n\r", 25);
-			send("stage_number: ", 14);
-			send_byte(acc_comm_state.stage_number);
-			send("\n\r", 2);
-			assert(0, "acc_write_mode_handler");
-			break;
+		default: assert(0, "acc_write_mode_handler"); break;
 	}
 }
 
-void acc_read_mode_handler(uint16_t SR1) {
+// Handles i2c interrupts in READ mode.
+static void acc_read_mode_handler(uint16_t SR1) {
 	switch (acc_comm_state.stage_number) {
 		// Stage 0 is performed in acc_read_xyz().
 		case 1: 
@@ -252,17 +224,16 @@ void acc_read_mode_handler(uint16_t SR1) {
 				 	 i2c_goto_stage(1); // begin the next loop
 				 } else {
 				 	i2c_release();
-				 	on_acc_read_complete(acc_comm_state.acc_readings); // TODO make sure this is fine
+				 	on_acc_read_complete(acc_comm_state.acc_readings);
 				 }
 			}
 			break;
-		default: assert(0, "acc_read_mode_handler"); 
+		default: assert(0, "acc_read_mode_handler"); break;
 	}
 }
 
 void I2C1_EV_IRQHandler() {
 	uint16_t SR1 = I2C1->SR1;
-
 	switch (acc_comm_state.comm_mode) {
 		case WRITE: acc_write_mode_handler(SR1); break;
 		case  READ: acc_read_mode_handler(SR1);  break;
